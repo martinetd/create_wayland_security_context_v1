@@ -9,7 +9,7 @@ SECURITY_CONTEXT_PROTOCOL=$(WAYLAND_PROTOCOLS_DIR)/staging/security-context/secu
 HEADERS=security-context-client-protocol.h
 SOURCES=main.c security-context-protocol.c
 
-run_with_wl_security_context : $(HEADERS) $(SOURCES)
+create_wl_security_context : $(HEADERS) $(SOURCES)
 	clang $(CFLAGS) -o $@ $(SOURCES) $(WAYLAND_FLAGS)
 
 security-context-client-protocol.h :
@@ -20,4 +20,4 @@ security-context-protocol.c :
 
 .PHONY: clean
 clean :
-	rm -f run_with_wl_security_context security-context-protocol.c security-context-client-protocol.h
+	rm -f create_wl_security_context security-context-protocol.c security-context-client-protocol.h

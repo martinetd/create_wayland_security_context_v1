@@ -36,24 +36,32 @@ static const struct wl_registry_listener registry_listener = {
 int create_wl_socket(char *socket_path)
 {
 	char *socket_dir = getenv("XDG_RUNTIME_DIR");
-	if (!socket_dir) {
-		fprintf(stderr, "Failed to obtain runtime directory path\n");
+	char *socket_prefix = getenv("WAYLAND_DISPLAY");
+	if (!socket_dir || !socket_prefix) {
+		fprintf(stderr, "Failed to obtain runtime directory path or display\n");
 		return -1;
 	}
 
 	// Check if a wayland socket could be created in the runtime directory
-	snprintf(socket_path, 256, "%s/wayland-XXXXXX", socket_dir);
-	int ret = mkstemp(socket_path);
-	if (ret == -1) {
-		perror("Failed to create new wayland socket\n");
+	snprintf(socket_path, 256, "%s/%s-priv", socket_dir, socket_prefix);
+
+	struct sockaddr_un sockaddr = {
+		.sun_family = AF_UNIX,
+	};
+	snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%s", socket_path);
+
+	int test_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (connect(test_fd, (struct sockaddr *) &sockaddr, sizeof(sockaddr)) == 0) {
+		fprintf(stderr, "Already another socket at %s\n", socket_path);
+		close(test_fd);
 		return -1;
 	}
-	close(ret);
 	unlink(socket_path);
+	close(test_fd);
 
 	int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		fprintf(stderr, "Failed to create socket");
+		fprintf(stderr, "Failed to create socket\n");
 		perror("");
 		return -1;
 	}
@@ -61,18 +69,14 @@ int create_wl_socket(char *socket_path)
 	int flags = fcntl(listen_fd, F_GETFD);
 	fcntl(listen_fd, F_SETFD, flags | FD_CLOEXEC);
 
-	struct sockaddr_un sockaddr = {
-		.sun_family = AF_UNIX,
-	};
-	snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%s", socket_path);
 	if (bind(listen_fd, (struct sockaddr *) &sockaddr, sizeof(sockaddr)) != 0) {
-		fprintf(stderr, "Failed to bind to socket at %s", socket_path);
+		fprintf(stderr, "Failed to bind to socket at %s\n", socket_path);
 		close(listen_fd);
 		return -1;
 	}
 
 	if (listen(listen_fd, 0) != 0) {
-		fprintf(stderr, "Failed to listen on socket at %s", socket_path);
+		fprintf(stderr, "Failed to listen on socket at %s\n", socket_path);
 		close(listen_fd);
 		return -1;
 	}
@@ -81,11 +85,6 @@ int create_wl_socket(char *socket_path)
 
 int main(int argc, char *argv[])
 {
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s path_to_executable [arg1 [arg2...]]\n", argv[0]);
-		return EXIT_FAILURE;
-	}
-
 	int exit_code = EXIT_FAILURE;
 
 	struct wl_display *display;
@@ -93,7 +92,7 @@ int main(int argc, char *argv[])
 	struct wp_security_context_manager_v1 *security_context_manager = NULL;
 	struct wp_security_context_v1 *security_context;
 
-	int listen_fd = -1, ret, pid;
+	int listen_fd = -1, ret;
 	char socket_path[256];
 
 	display = wl_display_connect(NULL);
@@ -133,16 +132,10 @@ int main(int argc, char *argv[])
 	wp_security_context_v1_destroy(security_context);
 	wl_display_roundtrip(display);
 
-	setenv("WAYLAND_DISPLAY", basename(socket_path), 1);
-	unsetenv("WAYLAND_SOCKET");
+	printf("export WAYLAND_DISPLAY=%s\n", basename(socket_path));
+	while (access(socket_path, F_OK) == 0)
+		sleep(300);
 
-	pid = fork();
-	if (pid == 0) {
-		execv(argv[1], &argv[1]);
-		perror("Failed to run program");
-		return EXIT_FAILURE;
-	}
-	wait(NULL);
 	close(fds[0]);
 
 	exit_code = EXIT_SUCCESS;
