@@ -33,7 +33,7 @@ static const struct wl_registry_listener registry_listener = {
 	.global_remove = registry_handle_global_remove,
 };
 
-int create_wl_socket(char *socket_path)
+int create_wl_socket(char *priv_path, char *orig_path, char *tmp_path)
 {
 	char *socket_dir = getenv("XDG_RUNTIME_DIR");
 	char *socket_prefix = getenv("WAYLAND_DISPLAY");
@@ -43,21 +43,34 @@ int create_wl_socket(char *socket_path)
 	}
 
 	// Check if a wayland socket could be created in the runtime directory
-	snprintf(socket_path, 256, "%s/%s-priv", socket_dir, socket_prefix);
+	snprintf(priv_path, 256, "%s/%s-priv", socket_dir, socket_prefix);
+	snprintf(orig_path, 256, "%s/%s", socket_dir, socket_prefix);
+	snprintf(tmp_path, 256, "%s/%s-tmp", socket_dir, socket_prefix);
 
 	struct sockaddr_un sockaddr = {
 		.sun_family = AF_UNIX,
 	};
-	snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%s", socket_path);
+	snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%s", priv_path);
 
 	int test_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (connect(test_fd, (struct sockaddr *) &sockaddr, sizeof(sockaddr)) == 0) {
-		fprintf(stderr, "Already another socket at %s\n", socket_path);
+		// priv path exists and is setup:
+		// - orig path also ok -> this is running, exit
+		// - orig path doesn't connect -> keep going, but use priv path instead
 		close(test_fd);
-		return -1;
+		test_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%s", orig_path);
+		if (connect(test_fd, (struct sockaddr *) &sockaddr, sizeof(sockaddr)) == 0) {
+			fprintf(stderr, "Already another socket at %s and %s\n", orig_path, priv_path);
+			close(test_fd);
+			return -1;
+		}
+		setenv("WAYLAND_DISPLAY", basename(priv_path), 1);
+		priv_path[0] = 0;
 	}
-	unlink(socket_path);
 	close(test_fd);
+	snprintf(sockaddr.sun_path, sizeof(sockaddr.sun_path), "%s", tmp_path);
+	unlink(tmp_path);
 
 	int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
@@ -70,13 +83,13 @@ int create_wl_socket(char *socket_path)
 	fcntl(listen_fd, F_SETFD, flags | FD_CLOEXEC);
 
 	if (bind(listen_fd, (struct sockaddr *) &sockaddr, sizeof(sockaddr)) != 0) {
-		fprintf(stderr, "Failed to bind to socket at %s\n", socket_path);
+		fprintf(stderr, "Failed to bind to socket at %s\n", tmp_path);
 		close(listen_fd);
 		return -1;
 	}
 
 	if (listen(listen_fd, 0) != 0) {
-		fprintf(stderr, "Failed to listen on socket at %s\n", socket_path);
+		fprintf(stderr, "Failed to listen on socket at %s\n", tmp_path);
 		close(listen_fd);
 		return -1;
 	}
@@ -93,7 +106,13 @@ int main(int argc, char *argv[])
 	struct wp_security_context_v1 *security_context;
 
 	int listen_fd = -1, ret;
-	char socket_path[256];
+	char priv_path[256];
+	char orig_path[256];
+	char tmp_path[256];
+
+	listen_fd = create_wl_socket(priv_path, orig_path, tmp_path);
+	if (listen_fd == -1)
+		return EXIT_FAILURE;
 
 	display = wl_display_connect(NULL);
 	if (!display) {
@@ -114,11 +133,6 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Failed to bind security_context_manager\n");
 		goto exit;
 	}
-
-	listen_fd = create_wl_socket(socket_path);
-	if (listen_fd == -1)
-		goto exit;
-
 	int fds[2];
 	if (pipe2(fds, O_CLOEXEC) < 0)
 		goto exit;
@@ -132,9 +146,21 @@ int main(int argc, char *argv[])
 	wp_security_context_v1_destroy(security_context);
 	wl_display_roundtrip(display);
 
-	printf("export WAYLAND_DISPLAY=%s\n", basename(socket_path));
-	while (access(socket_path, F_OK) == 0)
-		sleep(300);
+	if (priv_path[0]) {
+		if (rename(orig_path, priv_path)) {
+			fprintf(stderr, "Could not rename %s -> %s: %m\n", orig_path, priv_path);
+			return 1;
+		}
+	}
+	if (rename(tmp_path, orig_path)) {
+		fprintf(stderr, "Could not rename %s -> %s: %m\n", tmp_path, orig_path);
+		return 1;
+	}
+
+	printf("ok\n");
+
+	while (1)
+		sleep(30000);
 
 	close(fds[0]);
 
