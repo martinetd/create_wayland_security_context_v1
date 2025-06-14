@@ -157,7 +157,13 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	printf("ok\n");
+	if (argc <= 1 || strcmp(argv[1], "-f")) {
+		// all done, double-fork
+		if (fork() != 0)
+			return 0;
+		if (fork() != 0)
+			return 0;
+	}
 
 	while (1)
 		sleep(30000);
